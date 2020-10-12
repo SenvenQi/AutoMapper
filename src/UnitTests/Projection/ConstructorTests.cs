@@ -6,6 +6,21 @@ using Xunit;
 
 namespace AutoMapper.UnitTests.Projection
 {
+    public class ConstructorToString : AutoMapperSpecBase
+    {
+        class Source
+        {
+            public int Value { get; set; }
+        }
+        class Destination
+        {
+            public Destination(string value) => Value = value;
+            public string Value { get; set; }
+        }
+        protected override MapperConfiguration Configuration { get; } = new MapperConfiguration(cfg => cfg.CreateMap<Source, Destination>());
+        [Fact]
+        public void Should_construct_correctly() => new[] { new Source { Value = 5 } }.AsQueryable().ProjectTo<Destination>(Configuration).First().Value.ShouldBe("5");
+    }
     public class ConstructorsWithCollections : AutoMapperSpecBase
     {
         class Addresses

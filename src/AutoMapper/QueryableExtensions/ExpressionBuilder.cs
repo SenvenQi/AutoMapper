@@ -99,9 +99,9 @@ namespace AutoMapper.QueryableExtensions.Impl
             }
             var memberBindings = new List<MemberBinding>();
             int depth;
-            if(OverMaxDepth())
+            if (OverMaxDepth())
             {
-                if(typeMap.Profile.AllowNullDestinationValues)
+                if (typeMap.Profile.AllowNullDestinationValues)
                 {
                     return null;
                 }
@@ -125,50 +125,50 @@ namespace AutoMapper.QueryableExtensions.Impl
             List<MemberBinding> CreateMemberBindings()
             {
                 var bindings = new List<MemberBinding>();
-                foreach (var propertyMap in typeMap.PropertyMaps
-                    .Where(pm => pm.CanResolveValue && ReflectionHelper.CanBeSet(pm.DestinationMember))
-                    .OrderBy(pm => pm.DestinationName))
+                foreach (var propertyMap in typeMap.PropertyMaps.Where(pm => pm.CanResolveValue && pm.DestinationMember.CanBeSet()).OrderBy(pm => pm.DestinationName))
                 {
                     var propertyExpression = new PropertyExpression(propertyMap);
                     letPropertyMaps.Push(propertyExpression);
                     if (propertyMap.ExplicitExpansion != true || request.ShouldExpand(letPropertyMaps.GetCurrentPath()))
                     {
-                        CreateMemberBinding(propertyExpression);
+                        var memberExpression = ProjectProperty(propertyExpression);
+                        if (memberExpression != null)
+                        {
+                            bindings.Add(Bind(propertyMap.DestinationMember, memberExpression));
+                        }
                     }
                     letPropertyMaps.Pop();
                 }
                 return bindings;
-                void CreateMemberBinding(PropertyExpression propertyExpression)
+            }
+            Expression ProjectProperty(PropertyExpression propertyExpression)
+            {
+                var propertyMap = propertyExpression.PropertyMap;
+                var result = ResolveExpression(propertyMap);
+                propertyExpression.Expression = result.NonMarkerExpression;
+                return ProjectMember(propertyMap, result);
+            }
+            Expression ProjectMember(IMemberMap propertyMap, ExpressionResolutionResult result)
+            {
+                var propertyRequest = new ExpressionRequest(result.Type, propertyMap.DestinationType, request.MembersToExpand, request);
+                if (propertyRequest.AlreadyExists && depth >= _configurationProvider.RecursiveQueriesMaxDepth)
                 {
-                    var propertyMap = propertyExpression.PropertyMap;
-                    var result = ResolveExpression(propertyMap);
-                    propertyExpression.Expression = result.NonMarkerExpression;
-                    var propertyTypeMap = _configurationProvider.ResolveTypeMap(result.Type, propertyMap.DestinationType);
-                    var propertyRequest = new ExpressionRequest(result.Type, propertyMap.DestinationType, request.MembersToExpand, request);
-                    if (propertyRequest.AlreadyExists && depth >= _configurationProvider.RecursiveQueriesMaxDepth)
-                    {
-                        return;
-                    }
-                    var binder = _configurationProvider.Binders.FirstOrDefault(b => b.IsMatch(propertyMap, propertyTypeMap, result));
-                    if (binder == null)
-                    {
-                        ThrowCannotMap(propertyMap, result);
-                    }
-                    var bindExpression = binder.Build(_configurationProvider, propertyMap, propertyTypeMap, propertyRequest, result, typePairCount, letPropertyMaps);
-                    if (bindExpression == null)
-                    {
-                        return;
-                    }
-                    var rhs = propertyMap.ValueTransformers
+                    return null;
+                }
+                var propertyTypeMap = _configurationProvider.ResolveTypeMap(result.Type, propertyMap.DestinationType);
+                var binder = _configurationProvider.Binders.FirstOrDefault(b => b.IsMatch(propertyMap, propertyTypeMap, result));
+                if (binder == null)
+                {
+                    ThrowCannotMap(propertyMap, result);
+                }
+                var mappedExpression = binder.Build(_configurationProvider, propertyMap, propertyTypeMap, propertyRequest, result, typePairCount, letPropertyMaps);
+                return mappedExpression == null ?
+                    null :
+                    propertyMap.ValueTransformers
                         .Concat(typeMap.ValueTransformers)
                         .Concat(typeMap.Profile.ValueTransformers)
                         .Where(vt => vt.IsMatch(propertyMap))
-                        .Aggregate(bindExpression.Expression, (current, vtConfig) => ToType(vtConfig.TransformerExpression.ReplaceParameters(ToType(current, vtConfig.ValueType)), propertyMap.DestinationType));
-
-                    bindExpression = bindExpression.Update(rhs);
-
-                    bindings.Add(bindExpression);
-                }
+                        .Aggregate(mappedExpression, (current, vtConfig) => ToType(vtConfig.TransformerExpression.ReplaceParameters(ToType(current, vtConfig.ValueType)), propertyMap.DestinationType));
             }
             ExpressionResolutionResult ResolveExpression(IMemberMap propertyMap)
             {
@@ -193,33 +193,21 @@ namespace AutoMapper.QueryableExtensions.Impl
                     return (NewExpression)ctorExpr.ReplaceParameters(instanceParameter);
                 }
                 return typeMap.ConstructorMap?.CanResolve == true ? ConstructorMapping(typeMap.ConstructorMap) : New(typeMap.DestinationTypeToUse);
-                NewExpression ConstructorMapping(ConstructorMap constructorMap) => New(constructorMap.Ctor, constructorMap.CtorParams.Select(CreateConstructorParameter));
-                Expression CreateConstructorParameter(ConstructorParameterMap map)
+                NewExpression ConstructorMapping(ConstructorMap constructorMap) => New(constructorMap.Ctor, constructorMap.CtorParams.Select(ProjectConstructorParameter));
+                Expression ProjectConstructorParameter(ConstructorParameterMap map)
                 {
                     var resolvedSource = ResolveExpression(map);
-                    var types = new TypePair(resolvedSource.Type, map.DestinationType);
-                    var typeMap = _configurationProvider.ResolveTypeMap(types);
-                    if (typeMap == null)
-                    {
-                        if (types.DestinationType.IsAssignableFrom(types.SourceType))
-                        {
-                            return resolvedSource.ResolutionExpression;
-                        }
-                        ThrowCannotMap(map, resolvedSource);
-                    }
-                    var newRequest = new ExpressionRequest(types.SourceType, types.DestinationType, request.MembersToExpand, request);
-                    return CreateMapExpressionCore(newRequest, resolvedSource.ResolutionExpression, typePairCount, typeMap, letPropertyMaps);
+                    var memberProjection = ProjectMember(map, resolvedSource);
+                    return memberProjection ?? Default(map.DestinationType);
                 }
             }
         }
-
         private static void ThrowCannotMap(IMemberMap propertyMap, ExpressionResolutionResult result)
         {
             var message =
                 $"Unable to create a map expression from {propertyMap.SourceMember?.DeclaringType?.Name}.{propertyMap.SourceMember?.Name} ({result.Type}) to {propertyMap.DestinationType.Name}.{propertyMap.DestinationName} ({propertyMap.DestinationType})";
             throw new AutoMapperMappingException(message, null, propertyMap.TypeMap.Types, propertyMap.TypeMap, propertyMap);
         }
-
         private abstract class ParameterExpressionVisitor : ExpressionVisitor
         {
             public static Expression SetParameters(object parameters, Expression expression)
